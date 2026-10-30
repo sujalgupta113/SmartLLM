@@ -1,4 +1,5 @@
 # 🤖 SmartLLM — Semantic Cache and Cost Optimizer
+🌐 **Live Demo:** [Open SmartLLM](https://smartllm-zkjfjjjvhg7zsvufxryzdm.streamlit.app/)
 
 SmartLLM is a Python-based application that uses semantic caching to reuse answers to similar questions, reduce unnecessary LLM calls, and monitor estimated API costs.
 
