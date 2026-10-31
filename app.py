@@ -294,6 +294,67 @@ def track_generation(usage):
     return request_cost
 
 
+def process_question(question):
+    """Run one prompt through the existing safety, semantic-cache, and provider workflow."""
+    question = question.strip()
+    if not question:
+        st.warning("Please enter a question.")
+        return
+
+    score, answer, result_type = None, None, None
+    safety_reason = cache.safety_reason(question)
+    try:
+        if safety_reason:
+            with st.spinner("Generating a fresh response..."):
+                usage = generate_answer(question)
+            answer = usage["answer"]
+            track_generation(usage)
+            result_type = "BYPASS"
+            st.session_state.bypasses += 1
+        else:
+            with st.spinner("Searching semantic cache..."):
+                cached_answer, score = cache.find(question)
+            if cached_answer is not None:
+                answer, result_type = cached_answer, "HIT"
+                st.session_state.hits += 1
+                st.session_state.avoided_calls += 1
+                saved_usage = st.session_state.cached_usage.get(question.casefold().strip())
+                if saved_usage:
+                    st.session_state.estimated_savings += saved_usage["cost"]
+            else:
+                with st.spinner("Generating a fresh response..."):
+                    usage = generate_answer(question)
+                answer = usage["answer"]
+                request_cost = track_generation(usage)
+                saved = cache.save(question, answer)
+                if saved:
+                    result_type = "MISS"
+                    st.session_state.misses += 1
+                    st.session_state.cached_usage[question.casefold().strip()] = {
+                        "input_tokens": usage["input_tokens"],
+                        "output_tokens": usage["output_tokens"], "cost": request_cost}
+                else:
+                    result_type = "BYPASS"
+                    st.session_state.bypasses += 1
+    except Exception as exc:
+        result_type = "ERROR"
+        st.session_state.errors += 1
+        if type(exc).__module__.startswith("openai"):
+            answer = "OpenAI request failed. Check your API key, credits, model access, and rate limits."
+        else:
+            answer = f"{type(exc).__name__}: {exc}"
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state.last_result = {
+        "question": question, "answer": answer, "result": result_type,
+        "score": score, "provider": AI_PROVIDER, "timestamp": timestamp,
+        "safety_reason": safety_reason}
+    st.session_state.history.append({
+        "Time": timestamp, "Question": question, "Result": result_type,
+        "Similarity": round(score, 3) if score is not None else None,
+        "Provider": AI_PROVIDER})
+
+
 def metric_card(label, value, icon, foot):
     st.markdown(f"""
     <div class="metric-card">
@@ -383,7 +444,12 @@ except Exception:
 
 # Premium workspace toolbar
 
-st.markdown('<div class="top-gradient"></div><div class="top-toolbar"><div class="toolbar-search">⌕ &nbsp; Search SmartLLM workspace...</div><div class="toolbar-meta">◉ &nbsp; Workspace &nbsp;&nbsp; · &nbsp;&nbsp; ⚙ Configuration</div></div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="top-gradient"></div>'
+    '<div class="top-toolbar"><div class="toolbar-meta">⚡ &nbsp; SMARTLLM WORKSPACE</div>'
+    '<div class="toolbar-meta">SEMANTIC CACHE STUDIO &nbsp; · &nbsp; AI COST OPTIMIZER</div></div>',
+    unsafe_allow_html=True,
+)
 
 # Overview
 if page == "Overview":
@@ -395,6 +461,40 @@ if page == "Overview":
     st.markdown(f'<div class="status-pill"><span class="status-dot"></span>{status}</div>', unsafe_allow_html=True)
     st.write("")
 
+    st.markdown(
+        '<div class="section-heading">Ask SmartLLM</div>'
+        '<div class="section-caption">Enter a question here. SmartLLM will check the semantic cache before generating a response.</div>',
+        unsafe_allow_html=True,
+    )
+    with st.container(border=True):
+        with st.form("dashboard_prompt_form", clear_on_submit=True):
+            dashboard_question = st.text_area(
+                "Ask a question",
+                placeholder="Ask SmartLLM anything... e.g. Explain semantic caching in simple terms.",
+                height=95,
+                label_visibility="collapsed",
+            )
+            dashboard_submit = st.form_submit_button(
+                "✦  Send to SmartLLM", use_container_width=True
+            )
+    if dashboard_submit:
+        if not dashboard_question or not dashboard_question.strip():
+            st.warning("Please enter a question.")
+        else:
+            process_question(dashboard_question)
+            st.rerun()
+
+    if st.session_state.last_result:
+        latest = st.session_state.last_result
+        st.markdown('<div class="section-heading">Latest dashboard response</div>', unsafe_allow_html=True)
+        if latest.get("safety_reason"):
+            st.warning(f"Safety rule '{latest['safety_reason']}' matched. This question was not cached.")
+        display_last_result()
+        st.caption(
+            f"Question: {latest['question']}  ·  Processed: {latest['timestamp']}  ·  Provider: {latest['provider']}"
+        )
+
+    st.write("")
     cols = st.columns(4)
     with cols[0]: metric_card("CACHE HIT RATE", f"{hit_rate:.1f}%", "◉", "Share of cacheable requests")
     with cols[1]: metric_card("SAVED ENTRIES", f"{database_count:,}", "▣", "Persistent SQLite records")
@@ -527,58 +627,7 @@ elif page == "AI Playground":
         if not question or not question.strip():
             st.warning("Please enter a question.")
         else:
-            question = question.strip()
-            score, answer, result_type = None, None, None
-            safety_reason = cache.safety_reason(question)
-            try:
-                if safety_reason:
-                    with st.spinner("Generating a fresh response..."):
-                        usage = generate_answer(question)
-                    answer = usage["answer"]
-                    track_generation(usage)
-                    result_type = "BYPASS"
-                    st.session_state.bypasses += 1
-                else:
-                    with st.spinner("Searching semantic cache..."):
-                        cached_answer, score = cache.find(question)
-                    if cached_answer is not None:
-                        answer, result_type = cached_answer, "HIT"
-                        st.session_state.hits += 1
-                        st.session_state.avoided_calls += 1
-                        saved_usage = st.session_state.cached_usage.get(question.casefold().strip())
-                        if saved_usage:
-                            st.session_state.estimated_savings += saved_usage["cost"]
-                    else:
-                        with st.spinner("Generating a fresh response..."):
-                            usage = generate_answer(question)
-                        answer = usage["answer"]
-                        request_cost = track_generation(usage)
-                        saved = cache.save(question, answer)
-                        if saved:
-                            result_type = "MISS"
-                            st.session_state.misses += 1
-                            st.session_state.cached_usage[question.casefold().strip()] = {
-                                "input_tokens": usage["input_tokens"],
-                                "output_tokens": usage["output_tokens"], "cost": request_cost}
-                        else:
-                            result_type = "BYPASS"
-                            st.session_state.bypasses += 1
-            except Exception as exc:
-                result_type = "ERROR"
-                st.session_state.errors += 1
-                if type(exc).__module__.startswith("openai"):
-                    answer = "OpenAI request failed. Check your API key, credits, model access, and rate limits."
-                else:
-                    answer = f"{type(exc).__name__}: {exc}"
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            st.session_state.last_result = {
-                "question": question, "answer": answer, "result": result_type,
-                "score": score, "provider": AI_PROVIDER, "timestamp": timestamp,
-                "safety_reason": safety_reason}
-            st.session_state.history.append({
-                "Time": timestamp, "Question": question, "Result": result_type,
-                "Similarity": round(score, 3) if score is not None else None,
-                "Provider": AI_PROVIDER})
+            process_question(question)
             st.rerun()
     if st.session_state.last_result:
         st.write("")
